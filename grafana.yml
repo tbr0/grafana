@@ -1,0 +1,120 @@
+# Usage:
+# heat -v stack-create $YOUR_STACK_NAME \
+# --template-file /path/to/grafana.template \
+# -P rax_tenant=$RAX_TENANT_ID \
+# -P rax_username=$RAX_USER_NAME \
+# -P rax_apikey=$RAX_API_KEY
+# -P host_name=$WHAT_YOU_WANT_TO_CALL_IT
+#
+# What to expect:
+# A Cloud Server with a self-contained Grafana 3.1.1 installation that serves metrics
+# from the Rackspace Cloud Metrics API. A default dashboard will be configured
+# to serve metrics from the server you spin up.
+#
+# Grafana will be protected with basic authentication, user=grafana, pass=$RANDOM_TEXT.
+#
+# You may need to request that the Cloud Metrics API endpoints be added to your
+# tenant. Contact support@rackspace.com for that.
+
+heat_template_version: 2016-10-14
+
+description: >
+  Build a stack that runs the latest version of Grafana in a Docker container.
+
+parameters:
+  image:
+    default: Ubuntu 16.04 LTS (Xenial Xerus) (Cloud)
+    label: Image
+    type: string
+    description: Cloud Server image that will be used.
+    constraints:
+    - allowed_values:
+      - Ubuntu 16.04 LTS (Xenial Xerus) (Cloud)
+  flavor:
+    default: 1 GB General Purpose v1
+    label: Flavor
+    type: string
+    description: Cloud Server flavor (size) to use.
+    constraints:
+    - allowed_values:
+      - 1 GB General Purpose v1
+      - 2 GB General Purpose v1
+      - 4 GB General Purpose v1
+      - 8 GB General Purpose v1
+  host_name:
+    default: grafana.example.com
+    type: string
+    description: Name of the server.
+    label: Server Hostname
+
+resources:
+  cloud_server:
+    type: OS::Nova::Server
+    properties:
+      key_name: { get_resource: ssh_key }
+      flavor: { get_param: flavor }
+      name: { get_param: [host_name, value] }
+      image: { get_param: image }
+      user_data_format: SOFTWARE_CONFIG
+      user_data: { get_resource: grafana_install }
+      software_config_transport: POLL_TEMP_URL
+      metadata:
+        rax-heat: { get_param: "OS::stack_id" }
+  ssh_key:
+    type: OS::Nova::KeyPair
+    properties:
+      name: { get_param: "OS::stack_id" }
+      save_private_key: true
+
+  load_balancer:
+    type: Rackspace::Cloud::LoadBalancer
+    properties:
+      name:
+        str_replace:
+          template: stack_Load_Balancer
+          params:
+            stack: { get_param: "OS::stack_name" }
+      port: 80
+      protocol: HTTP
+      algorithm: ROUND_ROBIN
+      contentCaching: ENABLED
+      virtualIps:
+      - type: PUBLIC
+        ipVersion: IPV4
+      metadata:
+        rax-heat: { get_param: "OS::stack_id" }
+      nodes:
+      - addresses: [ { get_attr: [cloud_server, networks, private, 0] } ]
+        port: 3000
+        condition: ENABLED
+
+  grafana_install:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ungrouped
+      config: |
+        #!/bin/bash -x
+        exec 2>&1
+        exec 1>/tmp/bash-debug.log
+        ps auxwwef
+        sleep 60
+        echo after sleep
+        ps auxwwef
+        apt-get update
+        apt-get upgrade -y
+        apt-get install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+        add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+        apt-get update
+        apt-get install -y docker-ce docker-ce-cli containerd.io
+        docker run -d -p 3000:3000 grafana/grafana
+outputs:
+  private_key:
+    description: SSH Private Key
+    value: { get_attr: [ssh_key, private_key] }
+  cloud_server_public_ip:
+    description: Public IP Address for Cloud Server.
+    value: { get_attr: [cloud_server, accessIPv4] }
+  lb_public_ip:
+    description: Public IP Address for Load Balancer.
+    value: { get_attr: [load_balancer, PublicIp] }
